@@ -342,6 +342,11 @@ struct scrcpy_options {
     bool camera_torch;
     bool keep_active;
     bool flex_display;
+    char *daemon_addr;              // --daemon=ip:port
+    int16_t start_daemon_port;      // --start-daemon[=<port>], -1=unset, 0=default
+    char *stop_daemon_addr;         // --stop-daemon=ip:port
+    char *restart_daemon_addr;      // --restart-daemon=ip:port[:new-port]
+    int16_t restart_daemon_new_port; // -1=unspecified, 0=same port, >0=new port
 };
 
 extern const struct scrcpy_options scrcpy_options_default;

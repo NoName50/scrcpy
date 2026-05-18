@@ -164,6 +164,30 @@ Crop the device screen on the server.
 The values are expressed in the device natural orientation (typically, portrait for a phone, landscape for a tablet).
 
 .TP
+.BI "\-D, \-\-daemon " ip\fR:\fIport
+Connect to a remote scrcpy daemon server.
+
+The daemon must be started on the Android device using \fB\-\-start\-daemon\fR first.
+
+.TP
+.BI "\-\-start\-daemon" [=port]
+Start a daemon server on the device. This pushes the server binary and starts a
+persistent daemon that accepts connections from clients.
+
+If no port is specified, the default port (27183) is used.
+
+.TP
+.BI "\-\-stop\-daemon " ip\fR:\fIport
+Stop a running daemon server at the given address.
+
+.TP
+.BI "\-\-restart\-daemon " ip\fR:\fIport\fR[:\fIrestart\-port\fR]
+Restart a running daemon server.
+
+If \fIrestart\-port\fR is specified, the daemon restarts on that port.
+Otherwise, it restarts on the same port.
+
+.TP
 .B \-d, \-\-select\-usb
 Use USB device (if there is exactly one, like adb -d).
 

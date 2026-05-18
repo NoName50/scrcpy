@@ -405,6 +405,11 @@ scrcpy(struct scrcpy_options *options) {
         .keep_active = options->keep_active,
         .flex_display = options->flex_display,
         .list = options->list,
+        .daemon_addr = options->daemon_addr,
+        .start_daemon_port = options->start_daemon_port,
+        .stop_daemon_addr = options->stop_daemon_addr,
+        .restart_daemon_addr = options->restart_daemon_addr,
+        .restart_daemon_new_port = options->restart_daemon_new_port,
     };
 
     static const struct sc_server_callbacks cbs = {

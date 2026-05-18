@@ -68,7 +68,7 @@ public final class Server {
         // not instantiable
     }
 
-    private static void scrcpy(Options options) throws IOException, ConfigurationException {
+    public static void scrcpy(Options options) throws IOException, ConfigurationException {
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
@@ -194,7 +194,7 @@ public final class Server {
         }
     }
 
-    private static void prepareMainLooper() {
+    public static void prepareMainLooper() {
         // Like Looper.prepareMainLooper(), but with quitAllowed set to true
         Looper.prepare();
         synchronized (Looper.class) {
@@ -277,12 +277,12 @@ public final class Server {
     }
 
     @SuppressWarnings("deprecation")
-    private static void dropRootPrivileges() {
+    public static void dropRootPrivileges() {
         try {
             if (Os.getuid() == 0) {
                 // Copy-paste does not work with root user
                 // <https://github.com/Genymobile/scrcpy/issues/6224>
-                Os.setuid(2000);
+                Os.setuid(1000);
             }
         } catch (Exception e) {
             Ln.w("Cannot set UID", e);

@@ -14,6 +14,8 @@
 #include "util/net_intr.h"
 #include "util/process.h"
 #include "util/str.h"
+#include "util/strbuf.h"
+#include "util/net.h"
 
 #define SC_SERVER_FILENAME "scrcpy-server"
 
@@ -450,6 +452,7 @@ execute_server(struct sc_server *server,
     }
 
 #undef ADD_PARAM
+#undef VALIDATE_STRING
 
     cmd[count++] = NULL;
 
@@ -772,6 +775,497 @@ sc_server_on_terminated(void *userdata) {
     LOGD("Server terminated");
 }
 
+static bool
+parse_daemon_addr(const char *addr, uint32_t *host, uint16_t *port) {
+    // Parse "ip:port" format
+    char *colon = strchr(addr, ':');
+    if (!colon) {
+        LOGE("Invalid daemon address (expected ip:port): %s", addr);
+        return false;
+    }
+
+    // Temporarily split
+    size_t ip_len = colon - addr;
+    char *ip = malloc(ip_len + 1);
+    if (!ip) {
+        LOG_OOM();
+        return false;
+    }
+    memcpy(ip, addr, ip_len);
+    ip[ip_len] = '\0';
+
+    bool ok = net_parse_ipv4(ip, host);
+    free(ip);
+    if (!ok) {
+        return false;
+    }
+
+    const char *port_str = colon + 1;
+    long port_val;
+    if (!sc_str_parse_integer(port_str, &port_val)
+            || port_val < 0 || port_val > 0xFFFF) {
+        LOGE("Invalid daemon port: %s", port_str);
+        return false;
+    }
+
+    *port = (uint16_t) port_val;
+    return true;
+}
+
+// Send daemon commands to a control socket at (host, port)
+// command: a null-terminated string like "kill_daemon" or "restart_daemon=<port>"
+static bool
+send_daemon_command(struct sc_intr *intr, uint32_t host, uint16_t port,
+                    const char *command) {
+    sc_socket sock = net_socket();
+    if (sock == SC_SOCKET_NONE) {
+        return false;
+    }
+
+    bool ok = net_connect_intr(intr, sock, host, port);
+    if (!ok) {
+        net_close(sock);
+        return false;
+    }
+
+    // Send version first (required by Options.parse on server)
+    const char *version = SCRCPY_VERSION "\n";
+    size_t ver_len = strlen(version);
+    ssize_t w = net_send_all_intr(intr, sock, version, ver_len);
+    if (w != (ssize_t) ver_len) {
+        net_close(sock);
+        return false;
+    }
+
+    // Send command line
+    size_t cmd_len = strlen(command);
+    w = net_send_all_intr(intr, sock, command, cmd_len);
+    if (w != (ssize_t) cmd_len) {
+        net_close(sock);
+        return false;
+    }
+
+    // Send newline (empty line marks end of options)
+    w = net_send_all_intr(intr, sock, "\n", 1);
+    if (w != 1) {
+        net_close(sock);
+        return false;
+    }
+
+    net_close(sock);
+    return true;
+}
+
+// Connect to a remote daemon and set up sockets
+static bool
+sc_server_connect_to_daemon(struct sc_server *server,
+                            struct sc_server_info *info) {
+    const struct sc_server_params *params = &server->params;
+
+    uint32_t host;
+    uint16_t port;
+    if (!parse_daemon_addr(params->daemon_addr, &host, &port)) {
+        return false;
+    }
+
+    bool video = params->video;
+    bool audio = params->audio;
+    bool control = params->control;
+
+    LOGI("Connecting to daemon at %s", params->daemon_addr);
+
+    // Step 1: Connect to control port to send options first.
+    // This triggers the daemon to start the scrcpy session and BridgeRunner.
+    sc_socket opt_socket = net_socket();
+    if (opt_socket == SC_SOCKET_NONE) {
+        goto fail;
+    }
+    bool ok = net_connect_intr(&server->intr, opt_socket, host, port);
+    if (!ok) {
+        net_close(opt_socket);
+        goto fail;
+    }
+
+    // Send options as lines, then empty line
+    struct sc_strbuf buf;
+    if (!sc_strbuf_init(&buf, 128)) {
+        net_close(opt_socket);
+        goto fail;
+    }
+
+    // Send version first (required by Options.parse on server)
+    sc_strbuf_append_str(&buf, SCRCPY_VERSION "\n");
+
+    // Build daemon connection options: we need to send the options as lines
+    // similar to how AdbTunnel would send them.
+#define ADD_PARAM(fmt, ...) do { \
+        char *p; \
+        if (asprintf(&p, fmt, ## __VA_ARGS__) == -1) { \
+            goto fail; \
+        } \
+        sc_strbuf_append_str(&buf, p); \
+        sc_strbuf_append_char(&buf, '\n'); \
+    } while(0)
+#define VALIDATE_STRING(s) do { \
+        if (!validate_string(s)) { \
+            goto fail; \
+        } \
+    } while(0)
+
+    ADD_PARAM("scid=%08x", params->scid);
+    ADD_PARAM("log_level=%s", log_level_to_server_string(params->log_level));
+
+    if (!params->video) {
+        ADD_PARAM("video=false");
+    }
+    if (params->video_bit_rate) {
+        ADD_PARAM("video_bit_rate=%" PRIu32, params->video_bit_rate);
+    }
+    if (!params->audio) {
+        ADD_PARAM("audio=false");
+    }
+    if (params->audio_bit_rate) {
+        ADD_PARAM("audio_bit_rate=%" PRIu32, params->audio_bit_rate);
+    }
+    if (params->video_codec != SC_CODEC_H264) {
+        ADD_PARAM("video_codec=%s",
+                  sc_server_get_codec_name(params->video_codec));
+    }
+    if (params->audio_codec != SC_CODEC_OPUS) {
+        ADD_PARAM("audio_codec=%s",
+            sc_server_get_codec_name(params->audio_codec));
+    }
+    if (params->video_source != SC_VIDEO_SOURCE_DISPLAY) {
+        assert(params->video_source == SC_VIDEO_SOURCE_CAMERA);
+        ADD_PARAM("video_source=camera");
+    }
+    // If audio is enabled, an "auto" audio source must have been resolved
+    assert(params->audio_source != SC_AUDIO_SOURCE_AUTO || !params->audio);
+    if (params->audio_source != SC_AUDIO_SOURCE_OUTPUT && params->audio) {
+        ADD_PARAM("audio_source=%s",
+                  sc_server_get_audio_source_name(params->audio_source));
+    }
+    if (params->audio_dup) {
+        ADD_PARAM("audio_dup=true");
+    }
+    if (params->max_size) {
+        ADD_PARAM("max_size=%" PRIu16, params->max_size);
+    }
+    if (params->max_fps) {
+        VALIDATE_STRING(params->max_fps);
+        ADD_PARAM("max_fps=%s", params->max_fps);
+    }
+    if (params->min_size_alignment != 1) {
+        ADD_PARAM("min_size_alignment=%" PRIu8, params->min_size_alignment);
+    }
+    if (params->angle) {
+        VALIDATE_STRING(params->angle);
+        ADD_PARAM("angle=%s", params->angle);
+    }
+    if (params->capture_orientation_lock != SC_ORIENTATION_UNLOCKED
+            || params->capture_orientation != SC_ORIENTATION_0) {
+        if (params->capture_orientation_lock == SC_ORIENTATION_LOCKED_INITIAL) {
+            ADD_PARAM("capture_orientation=@");
+        } else {
+            const char *orient =
+                sc_orientation_get_name(params->capture_orientation);
+            bool locked =
+                params->capture_orientation_lock != SC_ORIENTATION_UNLOCKED;
+            ADD_PARAM("capture_orientation=%s%s", locked ? "@" : "", orient);
+        }
+    }
+    if (server->tunnel.forward) {
+        ADD_PARAM("tunnel_forward=true");
+    }
+    if (params->crop) {
+        VALIDATE_STRING(params->crop);
+        ADD_PARAM("crop=%s", params->crop);
+    }
+    if (!params->control) {
+        // By default, control is true
+        ADD_PARAM("control=false");
+    }
+    if (params->display_id) {
+        ADD_PARAM("display_id=%" PRIu32, params->display_id);
+    }
+    if (params->camera_id) {
+        VALIDATE_STRING(params->camera_id);
+        ADD_PARAM("camera_id=%s", params->camera_id);
+    }
+    if (params->camera_size) {
+        VALIDATE_STRING(params->camera_size);
+        ADD_PARAM("camera_size=%s", params->camera_size);
+    }
+    if (params->camera_facing != SC_CAMERA_FACING_ANY) {
+        ADD_PARAM("camera_facing=%s",
+            sc_server_get_camera_facing_name(params->camera_facing));
+    }
+    if (params->camera_ar) {
+        VALIDATE_STRING(params->camera_ar);
+        ADD_PARAM("camera_ar=%s", params->camera_ar);
+    }
+    if (params->camera_fps) {
+        ADD_PARAM("camera_fps=%" PRIu16, params->camera_fps);
+    }
+    if (params->camera_high_speed) {
+        ADD_PARAM("camera_high_speed=true");
+    }
+    if (params->camera_torch) {
+        ADD_PARAM("camera_torch=true");
+    }
+    if (params->camera_zoom) {
+        VALIDATE_STRING(params->camera_zoom);
+        ADD_PARAM("camera_zoom=%s", params->camera_zoom);
+    }
+    if (params->show_touches) {
+        ADD_PARAM("show_touches=true");
+    }
+    if (params->stay_awake) {
+        ADD_PARAM("stay_awake=true");
+    }
+    if (params->screen_off_timeout != -1) {
+        assert(params->screen_off_timeout >= 0);
+        uint64_t ms = SC_TICK_TO_MS(params->screen_off_timeout);
+        ADD_PARAM("screen_off_timeout=%" PRIu64, ms);
+    }
+    if (params->video_codec_options) {
+        VALIDATE_STRING(params->video_codec_options);
+        ADD_PARAM("video_codec_options=%s", params->video_codec_options);
+    }
+    if (params->audio_codec_options) {
+        VALIDATE_STRING(params->audio_codec_options);
+        ADD_PARAM("audio_codec_options=%s", params->audio_codec_options);
+    }
+    if (params->video_encoder) {
+        VALIDATE_STRING(params->video_encoder);
+        ADD_PARAM("video_encoder=%s", params->video_encoder);
+    }
+    if (params->audio_encoder) {
+        VALIDATE_STRING(params->audio_encoder);
+        ADD_PARAM("audio_encoder=%s", params->audio_encoder);
+    }
+    if (params->power_off_on_close) {
+        ADD_PARAM("power_off_on_close=true");
+    }
+    if (!params->clipboard_autosync) {
+        // By default, clipboard_autosync is true
+        ADD_PARAM("clipboard_autosync=false");
+    }
+    if (!params->downsize_on_error) {
+        // By default, downsize_on_error is true
+        ADD_PARAM("downsize_on_error=false");
+    }
+    if (!params->cleanup) {
+        // By default, cleanup is true
+        ADD_PARAM("cleanup=false");
+    }
+    if (!params->power_on) {
+        // By default, power_on is true
+        ADD_PARAM("power_on=false");
+    }
+    if (params->new_display) {
+        VALIDATE_STRING(params->new_display);
+        ADD_PARAM("new_display=%s", params->new_display);
+    }
+    if (params->flex_display) {
+        ADD_PARAM("flex_display=true");
+    }
+    if (params->display_ime_policy != SC_DISPLAY_IME_POLICY_UNDEFINED) {
+        ADD_PARAM("display_ime_policy=%s",
+            sc_server_get_display_ime_policy_name(params->display_ime_policy));
+    }
+    if (!params->vd_destroy_content) {
+        ADD_PARAM("vd_destroy_content=false");
+    }
+    if (!params->vd_system_decorations) {
+        ADD_PARAM("vd_system_decorations=false");
+    }
+    if (params->keep_active) {
+        ADD_PARAM("keep_active=true");
+    }
+    if (params->list & SC_OPTION_LIST_ENCODERS) {
+        ADD_PARAM("list_encoders=true");
+    }
+    if (params->list & SC_OPTION_LIST_DISPLAYS) {
+        ADD_PARAM("list_displays=true");
+    }
+    if (params->list & SC_OPTION_LIST_CAMERAS) {
+        ADD_PARAM("list_cameras=true");
+    }
+    if (params->list & SC_OPTION_LIST_CAMERA_SIZES) {
+        ADD_PARAM("list_camera_sizes=true");
+    }
+    if (params->list & SC_OPTION_LIST_APPS) {
+        ADD_PARAM("list_apps=true");
+    }
+
+#undef ADD_PARAM
+#undef VALIDATE_STRING
+
+    // Empty line marks end of options
+    sc_strbuf_append_char(&buf, '\n');
+
+    size_t buf_len = buf.len;
+    ssize_t w = net_send_all_intr(&server->intr, opt_socket, buf.s, buf_len);
+    free(buf.s);
+    if (w != (ssize_t) buf_len) {
+        net_close(opt_socket);
+        goto fail;
+    }
+    net_close(opt_socket);
+
+    // Step 2: Now connect to data channels: video=port+1, audio=port+2, ctrl=port+3
+    // This order must match the accept order in BridgeRunner and DesktopConnection.
+    // The daemon has already started the BridgeRunner after receiving options.
+    sc_socket video_socket = SC_SOCKET_NONE;
+    sc_socket audio_socket = SC_SOCKET_NONE;
+    sc_socket control_socket = SC_SOCKET_NONE;
+
+    unsigned attempts = 100;
+    sc_tick delay = SC_TICK_FROM_MS(100);
+    sc_socket first_socket = connect_to_server(server, attempts, delay,
+                                                host, port);
+    if (first_socket == SC_SOCKET_NONE) {
+        goto fail;
+    }
+
+    if (video) {
+        video_socket = first_socket;
+    }
+
+    if (audio) {
+        if (!video) {
+            audio_socket = first_socket;
+        } else {
+            audio_socket = net_socket();
+            if (audio_socket == SC_SOCKET_NONE) {
+                goto fail;
+            }
+            bool ok = net_connect_intr(&server->intr, audio_socket,
+                                        host, port);
+            if (!ok) {
+                goto fail;
+            }
+        }
+    }
+
+    if (control) {
+        if (!video && !audio) {
+            control_socket = first_socket;
+        } else {
+            control_socket = net_socket();
+            if (control_socket == SC_SOCKET_NONE) {
+                goto fail;
+            }
+            bool ok = net_connect_intr(&server->intr, control_socket,
+                                        host, port);
+            if (!ok) {
+                goto fail;
+            }
+        }
+    }
+
+    // Set TCP_NODELAY on control socket
+    if (control_socket != SC_SOCKET_NONE) {
+        ok = net_set_tcp_nodelay(control_socket, true);
+        (void) ok;
+    }
+
+    ok = device_read_info(&server->intr, first_socket, info);
+    if (!ok) {
+        goto fail;
+    }
+
+    assert(!video || video_socket != SC_SOCKET_NONE);
+    assert(!audio || audio_socket != SC_SOCKET_NONE);
+    assert(!control || control_socket != SC_SOCKET_NONE);
+
+    server->video_socket = video_socket;
+    server->audio_socket = audio_socket;
+    server->control_socket = control_socket;
+
+    // Use the daemon address as a synthetic serial (ADB is not involved)
+    server->serial = strdup(params->daemon_addr);
+    if (!server->serial) {
+        LOG_OOM();
+        goto fail;
+    }
+
+    return true;
+
+fail:
+    if (video_socket != SC_SOCKET_NONE) {
+        net_close(video_socket);
+    }
+    if (audio_socket != SC_SOCKET_NONE) {
+        net_close(audio_socket);
+    }
+    if (control_socket != SC_SOCKET_NONE) {
+        net_close(control_socket);
+    }
+    return false;
+}
+
+// Start daemon on the device with the given port
+static bool
+sc_server_start_daemon(struct sc_server *server, const char *serial,
+                       uint16_t daemon_port) {
+    LOGI("Starting daemon on device on port %" PRIu16 "...", daemon_port);
+
+    const char *cmd[32];
+    unsigned count = 0;
+    cmd[count++] = sc_adb_get_executable();
+    cmd[count++] = "-s";
+    cmd[count++] = serial;
+    cmd[count++] = "shell";
+    cmd[count++] = "CLASSPATH=" SC_DEVICE_SERVER_PATH;
+    cmd[count++] = "app_process";
+    cmd[count++] = "/";
+    cmd[count++] = "com.genymobile.scrcpy.DaemonServer";
+    cmd[count++] = SCRCPY_VERSION;
+
+    char port_arg[64];
+    snprintf(port_arg, sizeof(port_arg), "--daemon-port=%" PRIu16, daemon_port);
+    cmd[count++] = port_arg;
+
+    cmd[count++] = NULL;
+
+    return sc_adb_execute(cmd, 0) != SC_PROCESS_NONE;
+}
+
+// Stop a daemon at the given address
+static bool
+sc_server_daemon_stop(struct sc_server *server, const char *addr) {
+    uint32_t host;
+    uint16_t port;
+    if (!parse_daemon_addr(addr, &host, &port)) {
+        return false;
+    }
+
+    LOGI("Stopping daemon at %s...", addr);
+    return send_daemon_command(&server->intr, host, port, "kill_daemon=true");
+}
+
+// Restart a daemon at the given address
+static bool
+sc_server_daemon_restart(struct sc_server *server, const char *addr,
+                         uint16_t restart_port) {
+    uint32_t host;
+    uint16_t port;
+    if (!parse_daemon_addr(addr, &host, &port)) {
+        return false;
+    }
+
+    LOGI("Restarting daemon at %s on port %" PRIu16 "...", addr, restart_port);
+    char cmd[64];
+    if (restart_port) {
+        snprintf(cmd, sizeof(cmd), "restart_daemon=%" PRIu16, restart_port);
+    } else {
+        snprintf(cmd, sizeof(cmd), "restart_daemon=0");
+    }
+    return send_daemon_command(&server->intr, host, port, cmd);
+}
+
 static uint16_t
 get_adb_tcp_port(struct sc_server *server, const char *serial) {
     struct sc_intr *intr = &server->intr;
@@ -954,10 +1448,105 @@ sc_server_kill_adb_if_requested(struct sc_server *server) {
 }
 
 static int
+run_daemon_path(struct sc_server *server) {
+    const struct sc_server_params *params = &server->params;
+
+    // Handle --stop-daemon
+    if (params->stop_daemon_addr) {
+        bool ok = sc_server_daemon_stop(server, params->stop_daemon_addr);
+        if (!ok) {
+            LOGE("Failed to stop daemon at %s", params->stop_daemon_addr);
+            goto error_connection_failed;
+        }
+        LOGI("Daemon at %s stopped successfully", params->stop_daemon_addr);
+        server->cbs->on_connected(server, server->cbs_userdata);
+        return 0;
+    }
+
+    // Handle --restart-daemon
+    if (params->restart_daemon_addr) {
+        bool ok = sc_server_daemon_restart(server,
+                                           params->restart_daemon_addr,
+                                           params->restart_daemon_new_port);
+        if (!ok) {
+            LOGE("Failed to restart daemon at %s", params->restart_daemon_addr);
+            goto error_connection_failed;
+        }
+        LOGI("Daemon at %s restarted successfully", params->restart_daemon_addr);
+        server->cbs->on_connected(server, server->cbs_userdata);
+        return 0;
+    }
+
+    // Handle --start-daemon: start daemon on device, then return
+    if (params->start_daemon_port >= 0) {
+        const char *serial = server->serial;
+        assert(serial);
+
+        bool ok = push_server(&server->intr, serial);
+        if (!ok) {
+            goto error_connection_failed;
+        }
+
+        uint16_t dport = params->start_daemon_port ? params->start_daemon_port : 27183;
+        ok = sc_server_start_daemon(server, serial, dport);
+        if (!ok) {
+            LOGE("Failed to start daemon on device");
+            goto error_connection_failed;
+        }
+        LOGI("Daemon started on port %" PRIu16, dport);
+        server->cbs->on_connected(server, server->cbs_userdata);
+        return 0;
+    }
+
+    // Handle --daemon (-D): connect to a remote daemon and mirror
+    if (params->daemon_addr) {
+        bool ok = sc_server_connect_to_daemon(server, &server->info);
+        if (!ok) {
+            goto error_connection_failed;
+        }
+
+        server->cbs->on_connected(server, server->cbs_userdata);
+
+        // Wait for server_stop()
+        sc_mutex_lock(&server->mutex);
+        while (!server->stopped) {
+            sc_cond_wait(&server->cond_stopped, &server->mutex);
+        }
+        sc_mutex_unlock(&server->mutex);
+
+        if (server->video_socket != SC_SOCKET_NONE) {
+            net_interrupt(server->video_socket);
+        }
+        if (server->audio_socket != SC_SOCKET_NONE) {
+            net_interrupt(server->audio_socket);
+        }
+        if (server->control_socket != SC_SOCKET_NONE) {
+            net_interrupt(server->control_socket);
+        }
+
+        return 0;
+    }
+
+    LOGE("No daemon action specified");
+    goto error_connection_failed;
+
+error_connection_failed:
+    sc_server_kill_adb_if_requested(server);
+    server->cbs->on_connection_failed(server, server->cbs_userdata);
+    return -1;
+}
+
+static int
 run_server(void *data) {
     struct sc_server *server = data;
 
     const struct sc_server_params *params = &server->params;
+
+    // Check if this is a daemon-related operation
+    if (params->daemon_addr || params->start_daemon_port >= 0
+            || params->stop_daemon_addr || params->restart_daemon_addr) {
+        return run_daemon_path(server);
+    }
 
     // Execute "adb start-server" before "adb devices" so that daemon starting
     // output/errors is correctly printed in the console ("adb devices" output

@@ -109,6 +109,10 @@ enum {
     OPT_KEEP_ACTIVE,
     OPT_BACKGROUND_COLOR,
     OPT_RENDER_FIT,
+    OPT_DAEMON,
+    OPT_START_DAEMON,
+    OPT_STOP_DAEMON,
+    OPT_RESTART_DAEMON,
 };
 
 struct sc_option {
@@ -1048,6 +1052,35 @@ static const struct sc_option options[] = {
         .shortopt = 'x',
         .longopt = "flex-display",
         .text = "Continuously resize the virtual display to match the window.",
+    },
+    {
+        .shortopt = 'D',
+        .longopt_id = OPT_DAEMON,
+        .longopt = "daemon",
+        .argdesc = "ip:port",
+        .text = "Connect to a scrcpy daemon server at the given address.",
+    },
+    {
+        .longopt_id = OPT_START_DAEMON,
+        .longopt = "start-daemon",
+        .argdesc = "port",
+        .optional_arg = true,
+        .text = "Start a scrcpy daemon server on the connected device. "
+                "If no port is specified, the default port (27183) is used.",
+    },
+    {
+        .longopt_id = OPT_STOP_DAEMON,
+        .longopt = "stop-daemon",
+        .argdesc = "ip:port",
+        .text = "Stop a running scrcpy daemon server at the given address.",
+    },
+    {
+        .longopt_id = OPT_RESTART_DAEMON,
+        .longopt = "restart-daemon",
+        .argdesc = "ip:port[:restart-port]",
+        .text = "Restart a running scrcpy daemon server at the given address. "
+                "If a restart port is given, the daemon will listen on "
+                "that port after restart.",
     },
 };
 
@@ -2917,6 +2950,64 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case 'x':
                 opts->flex_display = true;
                 break;
+            case 'D':
+            case OPT_DAEMON: {
+                char *addr = optarg;
+                // Validate address format ip:port
+                if (addr) {
+                    opts->daemon_addr = addr;
+                }
+                break;
+            }
+            case OPT_START_DAEMON: {
+                opts->start_daemon_port = 0; // 0 means use default port
+                if (optarg) {
+                    long port;
+                    if (!parse_integer_arg(optarg, &port, false, 1, 65535,
+                                           "start-daemon port")) {
+                        return false;
+                    }
+                    opts->start_daemon_port = (int16_t) port;
+                }
+                break;
+            }
+            case OPT_STOP_DAEMON: {
+                opts->stop_daemon_addr = optarg;
+                break;
+            }
+            case OPT_RESTART_DAEMON: {
+                char *arg = optarg;
+                // Parse ip:port[:restart-port]
+                char *colon2 = strrchr(arg, ':');
+                char *port_part = NULL;
+                if (colon2) {
+                    *colon2 = '\0';
+                    port_part = colon2 + 1;
+                }
+                // Now arg points to "ip:port" (with : in middle)
+                char *colon1 = strchr(arg, ':');
+                if (!colon1) {
+                    LOGE("Invalid --restart-daemon format: expected ip:port[:restart-port]");
+                    if (colon2) *colon2 = ':';
+                    return false;
+                }
+                opts->restart_daemon_addr = arg;
+                if (port_part && *port_part) {
+                    long new_port;
+                    if (!parse_integer_arg(port_part, &new_port, false, 1, 65535,
+                                           "restart-daemon new port")) {
+                        if (colon2) *colon2 = ':';
+                        return false;
+                    }
+                    opts->restart_daemon_new_port = (int16_t) new_port;
+                } else {
+                    opts->restart_daemon_new_port = 0; // same port
+                }
+                // Don't restore the colon — arg is now permanently modified,
+                // but it's optarg which is owned by the caller. The address
+                // will be parsed correctly because strchr finds the first ':'
+                break;
+            }
             default:
                 // getopt prints the error message on stderr
                 return false;

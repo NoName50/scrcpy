@@ -80,6 +80,9 @@ public class Options {
     private boolean listCameraSizes;
     private boolean listApps;
 
+    private boolean killDaemon;
+    private int restartDaemon = -1;
+
     // Options not used by the scrcpy client, but useful to use scrcpy-server directly
     private boolean sendDeviceMeta = true; // send device name and size
     private boolean sendFrameMeta = true; // send PTS so that the client may record properly
@@ -296,6 +299,14 @@ public class Options {
 
     public boolean getListApps() {
         return listApps;
+    }
+
+    public boolean getKillDaemon() {
+        return killDaemon;
+    }
+
+    public int getRestartDaemon() {
+        return restartDaemon;
     }
 
     public boolean getSendDeviceMeta() {
@@ -538,6 +549,12 @@ public class Options {
                     break;
                 case "keep_active":
                     options.keepActive = Boolean.parseBoolean(value);
+                    break;
+                case "kill_daemon":
+                    options.killDaemon = Boolean.parseBoolean(value);
+                    break;
+                case "restart_daemon":
+                    options.restartDaemon = Integer.parseInt(value);
                     break;
                 case "send_device_meta":
                     options.sendDeviceMeta = Boolean.parseBoolean(value);

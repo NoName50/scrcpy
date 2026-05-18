@@ -121,6 +121,11 @@ const struct scrcpy_options scrcpy_options_default = {
     .camera_torch = false,
     .keep_active = false,
     .flex_display = false,
+    .daemon_addr = NULL,
+    .start_daemon_port = -1,
+    .stop_daemon_addr = NULL,
+    .restart_daemon_addr = NULL,
+    .restart_daemon_new_port = -1,
 };
 
 enum sc_orientation

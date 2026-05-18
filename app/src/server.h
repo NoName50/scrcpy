@@ -76,6 +76,11 @@ struct sc_server_params {
     bool keep_active;
     bool flex_display;
     uint8_t list;
+    char *daemon_addr;               // --daemon=ip:port
+    int16_t start_daemon_port;       // --start-daemon[=<port>]
+    char *stop_daemon_addr;          // --stop-daemon=ip:port
+    char *restart_daemon_addr;       // --restart-daemon=ip:port[:new-port]
+    int16_t restart_daemon_new_port; // from --restart-daemon
 };
 
 struct sc_server {
