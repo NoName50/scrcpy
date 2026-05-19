@@ -26,6 +26,7 @@ import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
+import android.system.Os;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,7 +57,7 @@ public final class Device {
 
     public static boolean supportsInputEvents(int displayId) {
         // main display or any display on Android >= 10
-        return displayId == 0 || Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10;
+        return displayId == 0 || Os.getuid() == 1000 || Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10;
     }
 
     public static boolean injectEvent(InputEvent inputEvent, int displayId, int injectMode) {

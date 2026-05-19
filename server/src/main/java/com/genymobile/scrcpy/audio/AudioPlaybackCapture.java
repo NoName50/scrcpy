@@ -13,6 +13,7 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaCodec;
 import android.os.Build;
+import android.system.Os;
 
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
@@ -109,7 +110,7 @@ public final class AudioPlaybackCapture implements AudioCapture {
 
     @Override
     public void checkCompatibility() throws AudioCaptureException {
-        if (Build.VERSION.SDK_INT < AndroidVersions.API_33_ANDROID_13) {
+        if ((Os.getuid() == 2000) && (Build.VERSION.SDK_INT < AndroidVersions.API_33_ANDROID_13)) {
             Ln.w("Audio disabled: audio playback capture source not supported before Android 13");
             throw new AudioCaptureException();
         }

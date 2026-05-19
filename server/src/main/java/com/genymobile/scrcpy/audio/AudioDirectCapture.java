@@ -14,6 +14,7 @@ import android.media.AudioRecord;
 import android.media.MediaCodec;
 import android.os.Build;
 import android.os.SystemClock;
+import android.system.Os;
 
 import java.nio.ByteBuffer;
 
@@ -63,12 +64,12 @@ public class AudioDirectCapture implements AudioCapture {
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         intent.addCategory(Intent.CATEGORY_LAUNCHER);
-        intent.setComponent(new ComponentName(FakeContext.PACKAGE_NAME, "com.android.shell.HeapDumpActivity"));
+        intent.setComponent(new ComponentName(FakeContext.PACKAGE_SHELL, "com.android.shell.HeapDumpActivity"));
         ServiceManager.getActivityManager().startActivity(intent);
     }
 
     private static void stopWorkaroundAndroid11() {
-        ServiceManager.getActivityManager().forceStopPackage(FakeContext.PACKAGE_NAME);
+        ServiceManager.getActivityManager().forceStopPackage(FakeContext.PACKAGE_SHELL);
     }
 
     private void tryStartRecording(int attempts, int delayMs) throws AudioCaptureException {
@@ -106,7 +107,7 @@ public class AudioDirectCapture implements AudioCapture {
 
     @Override
     public void checkCompatibility() throws AudioCaptureException {
-        if (Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11) {
+        if ((Os.getuid() == 2000) && (Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11)) {
             Ln.w("Audio disabled: it is not supported before Android 11");
             throw new AudioCaptureException();
         }
@@ -114,7 +115,7 @@ public class AudioDirectCapture implements AudioCapture {
 
     @Override
     public void start() throws AudioCaptureException {
-        if (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11) {
+        if ((Os.getuid() == 2000) && (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11)) {
             startWorkaroundAndroid11();
             try {
                 tryStartRecording(5, 100);
