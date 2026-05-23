@@ -1,19 +1,23 @@
 package com.genymobile.scrcpy.wrappers;
 
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
+import android.content.Context;
+import android.hardware.display.VirtualDisplay;
+import android.hardware.display.VirtualDisplayConfig;
+import android.media.projection.MediaProjection;
+import android.os.Build;
+import android.os.Handler;
+import android.system.Os;
+import android.view.Display;
+import android.view.Surface;
+
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.FakeContext;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.Size;
 import com.genymobile.scrcpy.util.Command;
 import com.genymobile.scrcpy.util.Ln;
-
-import android.annotation.SuppressLint;
-import android.annotation.TargetApi;
-import android.content.Context;
-import android.hardware.display.VirtualDisplay;
-import android.os.Handler;
-import android.view.Display;
-import android.view.Surface;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -25,30 +29,33 @@ import java.util.regex.Pattern;
 @SuppressLint("PrivateApi,DiscouragedPrivateApi")
 public final class DisplayManager {
 
+    // Internal fields copied from android.hardware.display.DisplayManager
+    public static final int VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 << 12;
+    public static final int VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR;
+    public static final int VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
+    public static final int VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP = 1 << 15;
+    public static final int VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
+    public static final int VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 << 11;
+    public static final int VIRTUAL_DISPLAY_FLAG_OWN_FOCUS = 1 << 14;
+    public static final int VIRTUAL_DISPLAY_FLAG_PRESENTATION = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
+    public static final int VIRTUAL_DISPLAY_FLAG_PUBLIC = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
+    public static final int VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT = 1 << 7;
+    public static final int VIRTUAL_DISPLAY_FLAG_SECURE = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE;
+    public static final int VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS = 1 << 9;
+    public static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
+    public static final int VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED = 1 << 13;
+    public static final int VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 10;
+
     // android.hardware.display.DisplayManager.EVENT_FLAG_DISPLAY_CHANGED
     public static final long EVENT_FLAG_DISPLAY_CHANGED = 1L << 2;
-
-    public interface DisplayListener {
-        /**
-         * Called whenever the properties of a logical {@link android.view.Display},
-         * such as size and density, have changed.
-         *
-         * @param displayId The id of the logical display that changed.
-         */
-        void onDisplayChanged(int displayId);
-    }
-
-    public static final class DisplayListenerHandle {
-        private final Object displayListenerProxy;
-        private DisplayListenerHandle(Object displayListenerProxy) {
-            this.displayListenerProxy = displayListenerProxy;
-        }
-    }
-
     private final Object manager; // instance of hidden class android.hardware.display.DisplayManagerGlobal
     private Method getDisplayInfoMethod;
     private Method createVirtualDisplayMethod;
     private Method requestDisplayPowerMethod;
+
+    private DisplayManager(Object manager) {
+        this.manager = manager;
+    }
 
     static DisplayManager create() {
         try {
@@ -59,10 +66,6 @@ public final class DisplayManager {
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
-    }
-
-    private DisplayManager(Object manager) {
-        this.manager = manager;
     }
 
     // public to call it from unit tests
@@ -160,17 +163,47 @@ public final class DisplayManager {
         }
     }
 
-    private Method getCreateVirtualDisplayMethod() throws NoSuchMethodException {
-        if (createVirtualDisplayMethod == null) {
-            createVirtualDisplayMethod = android.hardware.display.DisplayManager.class
-                    .getMethod("createVirtualDisplay", String.class, int.class, int.class, int.class, Surface.class);
+    /*
+        private Method getCreateVirtualDisplayMethod() throws NoSuchMethodException {
+            if (createVirtualDisplayMethod == null) {
+                createVirtualDisplayMethod = android.hardware.display.DisplayManager.class
+                        .getMethod("createVirtualDisplay", String.class, int.class, int.class, int.class, Surface.class);
+            }
+            return createVirtualDisplayMethod;
         }
-        return createVirtualDisplayMethod;
-    }
-
+    */
+    @SuppressLint("NewApi")
     public VirtualDisplay createVirtualDisplay(String name, int width, int height, int displayIdToMirror, Surface surface) throws Exception {
-        Method method = getCreateVirtualDisplayMethod();
-        return (VirtualDisplay) method.invoke(null, name, width, height, displayIdToMirror, surface);
+        // Method method = getCreateVirtualDisplayMethod();
+        // return (VirtualDisplay) method.invoke(null, name, width, height, displayIdToMirror, surface);
+        if (Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11) throw new Exception("Not supported");
+
+        int flags = VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR;
+        if (Os.getuid() == 1000 || Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11 && !"S".equals(Build.VERSION.CODENAME)) {
+            flags |= VIRTUAL_DISPLAY_FLAG_SECURE;
+        }
+
+        Constructor<android.hardware.display.DisplayManager> ctor = android.hardware.display.DisplayManager.class.getDeclaredConstructor(
+                Context.class);
+        ctor.setAccessible(true);
+        android.hardware.display.DisplayManager dm = ctor.newInstance(FakeContext.get());
+
+        VirtualDisplayConfig.Builder builder = new VirtualDisplayConfig.Builder(name, width,
+                height, 1 /* densityDpi */)
+                .setFlags(flags)
+                .setSurface(surface);
+        builder = (VirtualDisplayConfig.Builder) VirtualDisplayConfig.Builder.class.getMethod("setDisplayIdToMirror", int.class).invoke(builder, displayIdToMirror);
+        VirtualDisplayConfig virtualDisplayConfig = builder.build();
+
+        if (Build.VERSION.SDK_INT > AndroidVersions.API_33_ANDROID_13) {
+            return dm.createVirtualDisplay(virtualDisplayConfig);
+        }
+        return (VirtualDisplay) android.hardware.display.DisplayManager.class.getMethod("createVirtualDisplay",
+                        MediaProjection.class,
+                        VirtualDisplayConfig.class,
+                        VirtualDisplay.Callback.class,
+                        Handler.class)
+                .invoke(dm, null, virtualDisplayConfig, null, null);
     }
 
     public VirtualDisplay createNewVirtualDisplay(String name, int width, int height, int dpi, Surface surface, int flags) throws Exception {
@@ -204,7 +237,7 @@ public final class DisplayManager {
             Class<?> displayListenerClass = Class.forName("android.hardware.display.DisplayManager$DisplayListener");
             Object displayListenerProxy = Proxy.newProxyInstance(
                     ClassLoader.getSystemClassLoader(),
-                    new Class[] {displayListenerClass},
+                    new Class[]{displayListenerClass},
                     (proxy, method, args) -> {
                         if ("onDisplayChanged".equals(method.getName())) {
                             listener.onDisplayChanged((int) args[0]);
@@ -245,6 +278,24 @@ public final class DisplayManager {
             manager.getClass().getMethod("unregisterDisplayListener", displayListenerClass).invoke(manager, listener.displayListenerProxy);
         } catch (Exception e) {
             Ln.e("Could not unregister display listener", e);
+        }
+    }
+
+    public interface DisplayListener {
+        /**
+         * Called whenever the properties of a logical {@link android.view.Display},
+         * such as size and density, have changed.
+         *
+         * @param displayId The id of the logical display that changed.
+         */
+        void onDisplayChanged(int displayId);
+    }
+
+    public static final class DisplayListenerHandle {
+        private final Object displayListenerProxy;
+
+        private DisplayListenerHandle(Object displayListenerProxy) {
+            this.displayListenerProxy = displayListenerProxy;
         }
     }
 }

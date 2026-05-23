@@ -16,31 +16,18 @@ import com.genymobile.scrcpy.opengl.OpenGLFilter;
 import com.genymobile.scrcpy.opengl.OpenGLRunner;
 import com.genymobile.scrcpy.util.AffineMatrix;
 import com.genymobile.scrcpy.util.Ln;
+import com.genymobile.scrcpy.wrappers.DisplayManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.graphics.Rect;
 import android.hardware.display.VirtualDisplay;
 import android.os.Build;
+import android.system.Os;
 import android.view.Surface;
 
 import java.io.IOException;
 
 public class NewDisplayCapture extends SurfaceCapture {
-
-    // Internal fields copied from android.hardware.display.DisplayManager
-    private static final int VIRTUAL_DISPLAY_FLAG_PUBLIC = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
-    private static final int VIRTUAL_DISPLAY_FLAG_PRESENTATION = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
-    private static final int VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY = android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
-    private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
-    private static final int VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT = 1 << 7;
-    private static final int VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
-    private static final int VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS = 1 << 9;
-    private static final int VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 << 10;
-    private static final int VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 << 11;
-    private static final int VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 << 12;
-    private static final int VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED = 1 << 13;
-    private static final int VIRTUAL_DISPLAY_FLAG_OWN_FOCUS = 1 << 14;
-    private static final int VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP = 1 << 15;
 
     private final VirtualDisplayListener vdListener;
     private final NewDisplay newDisplay;
@@ -210,25 +197,29 @@ public class NewDisplayCapture extends SurfaceCapture {
 
     public void startNew(Surface surface) {
         try {
-            int flags = VIRTUAL_DISPLAY_FLAG_PUBLIC
-                    | VIRTUAL_DISPLAY_FLAG_PRESENTATION
-                    | VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-                    | VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH
-                    | VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT;
+            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT;
+            if (Os.getuid() == 1000 || Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11 || (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11
+                && !"S".equals(Build.VERSION.CODENAME))) {
+                flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE;
+            }
             if (vdDestroyContent) {
-                flags |= VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL;
+                flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL;
             }
             if (vdSystemDecorations) {
-                flags |= VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS;
+                flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS;
             }
             if (Build.VERSION.SDK_INT >= AndroidVersions.API_33_ANDROID_13) {
-                flags |= VIRTUAL_DISPLAY_FLAG_TRUSTED
-                        | VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP
-                        | VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED
-                        | VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED;
+                flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_TRUSTED
+                        | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP
+                        | DisplayManager.VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED
+                        | DisplayManager.VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED;
                 if (Build.VERSION.SDK_INT >= AndroidVersions.API_34_ANDROID_14) {
-                    flags |= VIRTUAL_DISPLAY_FLAG_OWN_FOCUS
-                            | VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP;
+                    flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_FOCUS
+                            | DisplayManager.VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP;
                 }
             }
             VirtualDisplay vd = ServiceManager.getDisplayManager()
